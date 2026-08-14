@@ -222,21 +222,67 @@ an explicit `Host` header rather than relying on browser DNS resolution.
 ## CI/CD — two independent, complementary paths
 
 ### 1. build-and-deploy (cloud runner, every push + manual)
-Runs on GitHub-hosted `ubuntu-latest`. Builds the Docker image, spins up its
-own disposable Kind cluster inside the runner, installs Vault via Helm,
-configures Kubernetes auth/policies/roles, applies all manifests, waits for
-both rollouts, and smoke-tests `/health`. This proves the entire pipeline is
-reproducible from a clean slate - the cluster is destroyed when the job
-ends, so this validates the process, not a persistent deployment.
+Runs on GitHub-hosted `ubuntu-latest`. Checks out the code, runs a Trivy
+dependency scan, builds the Docker image, runs a Trivy image scan, uploads
+both scan reports as artifacts, spins up its own disposable Kind cluster
+inside the runner, installs Vault via Helm, configures Kubernetes
+auth/policies/roles, applies all manifests, waits for both rollouts, and
+smoke-tests `/health`. This proves the entire pipeline is reproducible from
+a clean slate - the cluster is destroyed when the job ends, so this
+validates the process, not a persistent deployment.
 
 ### 2. deploy-to-local-cluster (self-hosted runner, manual trigger only)
 Runs on a self-hosted runner registered on the same machine as the actual
-demo cluster (devops-challenge). Rebuilds the image, loads it via
+local cluster (devops-challenge). Rebuilds the image, loads it via
 `kind load docker-image`, and restarts the backend Deployment - the
 automated equivalent of the manual rebuild cycle used throughout local
 development. Deliberately gated to `workflow_dispatch` only (never on
-`push`) so an ordinary commit can't unexpectedly restart the live demo
-cluster mid-recording.
+`push`) so an ordinary commit can't unexpectedly restart the local
+cluster while it's in active use.
+
+## Security Scanning — Trivy (bonus, part of the CI/CD pipeline)
+
+Two Trivy scans run automatically on every `build-and-deploy` execution,
+neither blocking the pipeline (findings are reported, not enforced, since
+none of the current findings have a fix available yet - see below):
+
+**1. Dependency scan** (`scan-type: fs`, targets `./app`) - checks
+`requirements.txt` against known vulnerable package versions. Result:
+**0 vulnerabilities** - FastAPI, uvicorn, and psycopg2-binary are clean at
+their pinned versions.
+
+**2. Docker image scan** (`image-ref: fluid-ai-backend:latest`) - inspects
+the fully built image's filesystem layers, covering both the OS packages
+inherited from the `python:3.11-slim` base image and every installed Python
+package. Result: **23 vulnerabilities (19 HIGH, 4 CRITICAL)**, all traced
+to the underlying Debian 13.6 base layer - none in the Python dependencies.
+Examples: `CVE-2026-53615` (integer overflow in `libblkid`),
+`CVE-2026-41992` (buffer overflow in `gzip`), `CVE-2025-69720` (buffer
+overflow in `ncurses`). None currently have a fixed version available from
+Debian, which is why the scan is configured non-blocking
+(`exit-code: '0'`) rather than failing the build on unfixable findings.
+
+**Reports are captured two ways**:
+- As a downloadable GitHub Actions artifact (`trivy-security-reports`) on
+  every workflow run
+- Committed permanently to the repo at [`security-reports/`](https://github.com/viditdevops/kubernetes-githubactions-kind/tree/main/security-reports),
+  independent of GitHub's 90-day artifact retention window
+
+**Scope, precisely**: this is an OS-and-dependency vulnerability scanner -
+it does not check application logic (SQL injection, unsafe patterns - that
+needs a SAST tool like Bandit), does not scan for secrets baked into the
+image (Trivy supports this via `scanners: secret`, not enabled here), and
+does not check Dockerfile misconfigurations (Trivy's `config` scanner,
+also not enabled here). Its job is strictly: for every OS and language
+package installed in the image, is there a publicly known CVE at this
+exact version.
+
+**Improvement identified but not implemented**: currently report-only.
+A stronger setup would set `exit-code: '1'` for CRITICAL findings with an
+available fix, so the pipeline actually blocks deployment instead of only
+logging - not done here since none of the current findings have a fix to
+gate on yet, and enabling it risked failing the pipeline on the base
+image's inherited, unfixable issues.
 
 ## Real debugging encountered while building this
 
@@ -288,6 +334,36 @@ kubectl apply -f k8s/backend-service.yaml
 kubectl apply -f k8s/ingress.yaml
 ```
 
+## Options considered and deliberately not implemented
+
+Beyond Vault (the chosen reliability improvement) and Ingress (implemented
+as a bonus), a few other options were evaluated during development and
+consciously set aside, with reasoning:
+
+- **EFK stack (Elasticsearch, Fluentd, Kibana) for logging** - considered,
+  but ruled out after checking available system RAM
+  (`systeminfo | findstr "Available Physical Memory"` showed only ~1.25GB
+  free against 16GB total). Elasticsearch alone typically needs 1-2GB of
+  JVM heap; attempting it risked OOM-killing or evicting the already-working
+  backend, Postgres, and Vault pods. A lighter alternative (Loki + Promtail
+  + Grafana) was identified as the more appropriate choice for a
+  resource-constrained local cluster, but wasn't implemented since
+  observability wasn't the chosen reliability improvement for this
+  challenge.
+- **Prometheus + Grafana for monitoring** - same resource-constraint
+  reasoning as above; a minimal hand-rolled setup (skipping Alertmanager,
+  node-exporter, kube-state-metrics) was identified as more survivable than
+  the full `kube-prometheus-stack`, but wasn't pursued given the available
+  RAM and the risk to the already-working environment.
+- **Persistent storage (PVC/PV) for Postgres** - explored and partially
+  designed (a `PersistentVolumeClaim` using Kind's default `local-path`
+  dynamic provisioner, mounted at `/var/lib/postgresql/data` with
+  `PGDATA` pointed at a subdirectory to avoid the `lost+found` conflict),
+  but ultimately not applied to the running cluster. As it stands,
+  Postgres data lives only in the pod's container filesystem and does not
+  survive a pod restart - this is a known, accepted limitation, not an
+  oversight.
+
 ## What was intentionally simplified, and what production would need
 
 - **Single Postgres replica, no PVC** - data lost on pod restart; real use
@@ -298,7 +374,7 @@ kubectl apply -f k8s/ingress.yaml
   cert-manager and a real certificate.
 - **No HPA** - fixed 2 replicas regardless of load; production needs a
   HorizontalPodAutoscaler.
-- **NodePort/port-forward for local access** - the demo cluster wasn't
+- **NodePort/port-forward for local access** - the cluster wasn't
   created with the kind-config.yaml port mapping from the start, so
   `kubectl port-forward` was used throughout instead of direct NodePort
   access.
