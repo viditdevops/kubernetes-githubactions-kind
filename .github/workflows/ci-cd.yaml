@@ -12,8 +12,43 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Scan dependencies for vulnerabilities (Trivy - filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ./app
+          scanners: vuln
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+          output: trivy-fs-report.txt
+
       - name: Build Docker image
         run: docker build -t fluid-ai-backend:latest ./app
+
+      - name: Scan Docker image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: fluid-ai-backend:latest
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+          output: trivy-image-report.txt
+
+      - name: Show scan reports in logs
+        run: |
+          echo "===== Filesystem/Dependency Scan ====="
+          cat trivy-fs-report.txt || true
+          echo "===== Docker Image Scan ====="
+          cat trivy-image-report.txt || true
+
+      - name: Upload Trivy reports as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-reports
+          path: |
+            trivy-fs-report.txt
+            trivy-image-report.txt
 
       - name: Create Kind cluster
         uses: helm/kind-action@v1.10.0
