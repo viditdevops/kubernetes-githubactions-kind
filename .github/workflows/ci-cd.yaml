@@ -7,40 +7,38 @@ on:
 
 jobs:
   build-and-deploy:
-    runs-on: self-hosted
-    defaults:
-      run:
-        shell: powershell
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Trivy (Windows binary)
-        run: |
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/aquasecurity/trivy/releases/latest"
-          $asset = $release.assets | Where-Object { $_.name -like "*windows-64bit.zip" } | Select-Object -First 1
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile trivy.zip
-          Expand-Archive -Path trivy.zip -DestinationPath trivy_bin -Force
-          Unblock-File -Path "$PWD\trivy_bin\trivy.exe"
-          echo "$PWD\trivy_bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-
       - name: Scan dependencies for vulnerabilities (Trivy - filesystem)
-        run: |
-          & "$PWD\trivy_bin\trivy.exe" fs --scanners vuln --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-fs-report.txt ./app
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ./app
+          scanners: vuln
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+          output: trivy-fs-report.txt
 
       - name: Build Docker image
         run: docker build -t fluid-ai-backend:latest ./app
 
       - name: Scan Docker image for vulnerabilities (Trivy)
-        run: |
-          & "$PWD\trivy_bin\trivy.exe" image --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-image-report.txt fluid-ai-backend:latest
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: fluid-ai-backend:latest
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+          output: trivy-image-report.txt
 
-      - name: Check Node.js is available (for Snyk CLI)
-        run: |
-          if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-            Write-Error "FATAL: npm not found on this self-hosted runner. Install Node.js to enable Snyk scanning."
-            exit 1
-          }
+      - name: Setup Node.js (for Snyk CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Install Snyk CLI
         run: npm install -g snyk
@@ -50,27 +48,25 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         working-directory: ./app
         run: |
-          snyk auth "$env:SNYK_TOKEN"
-          snyk test --severity-threshold=high --json-file-output=../snyk-deps-report.json
-          exit 0
+          snyk auth "$SNYK_TOKEN"
+          snyk test --severity-threshold=high --json-file-output=../snyk-deps-report.json || true
 
       - name: Scan Docker image for vulnerabilities (Snyk)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk container test fluid-ai-backend:latest --severity-threshold=high --json-file-output=snyk-image-report.json
-          exit 0
+          snyk container test fluid-ai-backend:latest --severity-threshold=high --json-file-output=snyk-image-report.json || true
 
       - name: Show scan reports in logs
         run: |
-          Write-Host "===== Trivy Filesystem/Dependency Scan ====="
-          Get-Content trivy-fs-report.txt -ErrorAction SilentlyContinue
-          Write-Host "===== Trivy Docker Image Scan ====="
-          Get-Content trivy-image-report.txt -ErrorAction SilentlyContinue
-          Write-Host "===== Snyk Dependency Scan ====="
-          Get-Content snyk-deps-report.json -ErrorAction SilentlyContinue
-          Write-Host "===== Snyk Docker Image Scan ====="
-          Get-Content snyk-image-report.json -ErrorAction SilentlyContinue
+          echo "===== Trivy Filesystem/Dependency Scan ====="
+          cat trivy-fs-report.txt || true
+          echo "===== Trivy Docker Image Scan ====="
+          cat trivy-image-report.txt || true
+          echo "===== Snyk Dependency Scan ====="
+          cat snyk-deps-report.json || true
+          echo "===== Snyk Docker Image Scan ====="
+          cat snyk-image-report.json || true
 
       - name: Upload security reports as artifacts
         uses: actions/upload-artifact@v4
@@ -82,8 +78,43 @@ jobs:
             snyk-deps-report.json
             snyk-image-report.json
 
-      - name: Load image into local Kind cluster
-        run: kind load docker-image fluid-ai-backend:latest --name devops-challenge
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: ci-cluster
+          config: kind-config.yaml
+
+      - name: Load image into Kind
+        run: kind load docker-image fluid-ai-backend:latest --name ci-cluster
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install Vault (dev mode) + Agent Injector
+        run: |
+          helm repo add hashicorp https://helm.releases.hashicorp.com
+          helm repo update
+          helm install vault hashicorp/vault \
+            --set "server.dev.enabled=true" \
+            --set "injector.enabled=true" \
+            --namespace vault --create-namespace \
+            --wait --timeout=120s
+
+      - name: Configure Vault (secret, k8s auth, policy, roles)
+        run: |
+          kubectl exec -n vault vault-0 -- vault kv put secret/fluid-ai/db \
+            host="postgres-service" port="5432" name="appdb" user="appuser" password="apppassword"
+          kubectl exec -n vault vault-0 -- vault auth enable kubernetes
+          kubectl exec -n vault vault-0 -- sh -c 'vault write auth/kubernetes/config kubernetes_host="https://$KUBERNETES_SERVICE_HOST:443"'
+          kubectl exec -n vault vault-0 -- sh -c 'vault policy write fluid-ai-db-policy - <<EOF
+          path "secret/data/fluid-ai/db" { capabilities = ["read"] }
+          EOF'
+          kubectl exec -n vault vault-0 -- vault write auth/kubernetes/role/fluid-ai-backend \
+            bound_service_account_names=fluid-ai-backend bound_service_account_namespaces=fluid-ai \
+            policies=fluid-ai-db-policy ttl=1h
+          kubectl exec -n vault vault-0 -- vault write auth/kubernetes/role/fluid-ai-postgres \
+            bound_service_account_names=fluid-ai-postgres bound_service_account_namespaces=fluid-ai \
+            policies=fluid-ai-db-policy ttl=1h
 
       - name: Apply Kubernetes manifests
         run: |
@@ -93,10 +124,9 @@ jobs:
           kubectl apply -f k8s/postgres-service.yaml
           kubectl apply -f k8s/backend-deployment.yaml
           kubectl apply -f k8s/backend-service.yaml
-          kubectl apply -f k8s/ingress.yaml
 
-      - name: Restart backend deployment (pick up new image)
-        run: kubectl rollout restart deployment/backend -n fluid-ai
+      - name: Wait for Postgres rollout
+        run: kubectl rollout status deployment/postgres -n fluid-ai --timeout=120s
 
       - name: Wait for backend rollout
         run: kubectl rollout status deployment/backend -n fluid-ai --timeout=120s
@@ -106,6 +136,6 @@ jobs:
 
       - name: Smoke test health endpoint
         run: |
-          Start-Process -NoNewWindow -FilePath kubectl -ArgumentList "port-forward","svc/backend-service","8000:8000","-n","fluid-ai"
-          Start-Sleep -Seconds 5
-          Invoke-WebRequest -Uri "http://localhost:8000/health" -UseBasicParsing
+          kubectl port-forward svc/backend-service 8000:8000 -n fluid-ai &
+          sleep 5
+          curl -f http://localhost:8000/health
