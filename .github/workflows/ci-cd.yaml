@@ -5,40 +5,39 @@ on:
     branches: [main]
   workflow_dispatch:
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   build-and-deploy:
     runs-on: self-hosted
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install Trivy (Windows binary)
         run: |
-          curl -sL -o trivy.zip https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Windows-64bit.zip
-          unzip -o trivy.zip -d trivy_bin
-          echo "$PWD/trivy_bin" >> "$GITHUB_PATH"
+          Invoke-WebRequest -Uri "https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Windows-64bit.zip" -OutFile trivy.zip
+          Expand-Archive -Path trivy.zip -DestinationPath trivy_bin -Force
+          echo "$PWD\trivy_bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Scan dependencies for vulnerabilities (Trivy - filesystem)
         run: |
-          "$PWD/trivy_bin/trivy.exe" fs --scanners vuln --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-fs-report.txt ./app
+          & "$PWD\trivy_bin\trivy.exe" fs --scanners vuln --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-fs-report.txt ./app
 
       - name: Build Docker image
         run: docker build -t fluid-ai-backend:latest ./app
 
       - name: Scan Docker image for vulnerabilities (Trivy)
         run: |
-          "$PWD/trivy_bin/trivy.exe" image --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-image-report.txt fluid-ai-backend:latest
+          & "$PWD\trivy_bin\trivy.exe" image --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-image-report.txt fluid-ai-backend:latest
 
       - name: Check Node.js is available (for Snyk CLI)
         run: |
-          if ! command -v npm >/dev/null 2>&1; then
-            echo "FATAL: npm not found on this self-hosted runner. Install Node.js on this machine to enable Snyk scanning." >&2
+          if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+            Write-Error "FATAL: npm not found on this self-hosted runner. Install Node.js to enable Snyk scanning."
             exit 1
-          fi
+          }
 
       - name: Install Snyk CLI
         run: npm install -g snyk
@@ -48,25 +47,27 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         working-directory: ./app
         run: |
-          snyk auth "$SNYK_TOKEN"
-          snyk test --severity-threshold=high --json-file-output=../snyk-deps-report.json || true
+          snyk auth "$env:SNYK_TOKEN"
+          snyk test --severity-threshold=high --json-file-output=../snyk-deps-report.json
+          exit 0
 
       - name: Scan Docker image for vulnerabilities (Snyk)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk container test fluid-ai-backend:latest --severity-threshold=high --json-file-output=snyk-image-report.json || true
+          snyk container test fluid-ai-backend:latest --severity-threshold=high --json-file-output=snyk-image-report.json
+          exit 0
 
       - name: Show scan reports in logs
         run: |
-          echo "===== Trivy Filesystem/Dependency Scan ====="
-          cat trivy-fs-report.txt || true
-          echo "===== Trivy Docker Image Scan ====="
-          cat trivy-image-report.txt || true
-          echo "===== Snyk Dependency Scan ====="
-          cat snyk-deps-report.json || true
-          echo "===== Snyk Docker Image Scan ====="
-          cat snyk-image-report.json || true
+          Write-Host "===== Trivy Filesystem/Dependency Scan ====="
+          Get-Content trivy-fs-report.txt -ErrorAction SilentlyContinue
+          Write-Host "===== Trivy Docker Image Scan ====="
+          Get-Content trivy-image-report.txt -ErrorAction SilentlyContinue
+          Write-Host "===== Snyk Dependency Scan ====="
+          Get-Content snyk-deps-report.json -ErrorAction SilentlyContinue
+          Write-Host "===== Snyk Docker Image Scan ====="
+          Get-Content snyk-image-report.json -ErrorAction SilentlyContinue
 
       - name: Upload security reports as artifacts
         uses: actions/upload-artifact@v4
@@ -102,6 +103,6 @@ jobs:
 
       - name: Smoke test health endpoint
         run: |
-          kubectl port-forward svc/backend-service 8000:8000 -n fluid-ai &
-          sleep 5
-          curl -f http://localhost:8000/health
+          Start-Process -NoNewWindow -FilePath kubectl -ArgumentList "port-forward","svc/backend-service","8000:8000","-n","fluid-ai"
+          Start-Sleep -Seconds 5
+          Invoke-WebRequest -Uri "http://localhost:8000/health" -UseBasicParsing
