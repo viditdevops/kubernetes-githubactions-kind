@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build-and-deploy:
     runs-on: self-hosted
@@ -12,28 +16,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install Trivy (Windows binary)
+        run: |
+          curl -sL -o trivy.zip https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Windows-64bit.zip
+          unzip -o trivy.zip -d trivy_bin
+          echo "$PWD/trivy_bin" >> "$GITHUB_PATH"
+
       - name: Scan dependencies for vulnerabilities (Trivy - filesystem)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: ./app
-          scanners: vuln
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: '0'
-          output: trivy-fs-report.txt
+        run: |
+          "$PWD/trivy_bin/trivy.exe" fs --scanners vuln --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-fs-report.txt ./app
 
       - name: Build Docker image
         run: docker build -t fluid-ai-backend:latest ./app
 
       - name: Scan Docker image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: fluid-ai-backend:latest
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: '0'
-          output: trivy-image-report.txt
+        run: |
+          "$PWD/trivy_bin/trivy.exe" image --severity HIGH,CRITICAL --format table --exit-code 0 -o trivy-image-report.txt fluid-ai-backend:latest
+
+      - name: Check Node.js is available (for Snyk CLI)
+        run: |
+          if ! command -v npm >/dev/null 2>&1; then
+            echo "FATAL: npm not found on this self-hosted runner. Install Node.js on this machine to enable Snyk scanning." >&2
+            exit 1
+          fi
 
       - name: Install Snyk CLI
         run: npm install -g snyk
