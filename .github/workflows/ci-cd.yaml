@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,11 +34,6 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: '0'
           output: trivy-image-report.txt
-
-      - name: Setup Node.js (for Snyk CLI)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
       - name: Install Snyk CLI
         run: npm install -g snyk
@@ -78,43 +73,8 @@ jobs:
             snyk-deps-report.json
             snyk-image-report.json
 
-      - name: Create Kind cluster
-        uses: helm/kind-action@v1.10.0
-        with:
-          cluster_name: ci-cluster
-          config: kind-config.yaml
-
-      - name: Load image into Kind
-        run: kind load docker-image fluid-ai-backend:latest --name ci-cluster
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-
-      - name: Install Vault (dev mode) + Agent Injector
-        run: |
-          helm repo add hashicorp https://helm.releases.hashicorp.com
-          helm repo update
-          helm install vault hashicorp/vault \
-            --set "server.dev.enabled=true" \
-            --set "injector.enabled=true" \
-            --namespace vault --create-namespace \
-            --wait --timeout=120s
-
-      - name: Configure Vault (secret, k8s auth, policy, roles)
-        run: |
-          kubectl exec -n vault vault-0 -- vault kv put secret/fluid-ai/db \
-            host="postgres-service" port="5432" name="appdb" user="appuser" password="apppassword"
-          kubectl exec -n vault vault-0 -- vault auth enable kubernetes
-          kubectl exec -n vault vault-0 -- sh -c 'vault write auth/kubernetes/config kubernetes_host="https://$KUBERNETES_SERVICE_HOST:443"'
-          kubectl exec -n vault vault-0 -- sh -c 'vault policy write fluid-ai-db-policy - <<EOF
-          path "secret/data/fluid-ai/db" { capabilities = ["read"] }
-          EOF'
-          kubectl exec -n vault vault-0 -- vault write auth/kubernetes/role/fluid-ai-backend \
-            bound_service_account_names=fluid-ai-backend bound_service_account_namespaces=fluid-ai \
-            policies=fluid-ai-db-policy ttl=1h
-          kubectl exec -n vault vault-0 -- vault write auth/kubernetes/role/fluid-ai-postgres \
-            bound_service_account_names=fluid-ai-postgres bound_service_account_namespaces=fluid-ai \
-            policies=fluid-ai-db-policy ttl=1h
+      - name: Load image into local Kind cluster
+        run: kind load docker-image fluid-ai-backend:latest --name devops-challenge
 
       - name: Apply Kubernetes manifests
         run: |
@@ -124,9 +84,10 @@ jobs:
           kubectl apply -f k8s/postgres-service.yaml
           kubectl apply -f k8s/backend-deployment.yaml
           kubectl apply -f k8s/backend-service.yaml
+          kubectl apply -f k8s/ingress.yaml
 
-      - name: Wait for Postgres rollout
-        run: kubectl rollout status deployment/postgres -n fluid-ai --timeout=120s
+      - name: Restart backend deployment (pick up new image)
+        run: kubectl rollout restart deployment/backend -n fluid-ai
 
       - name: Wait for backend rollout
         run: kubectl rollout status deployment/backend -n fluid-ai --timeout=120s
@@ -139,22 +100,3 @@ jobs:
           kubectl port-forward svc/backend-service 8000:8000 -n fluid-ai &
           sleep 5
           curl -f http://localhost:8000/health
-
-  deploy-to-local-cluster:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: self-hosted
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Build Docker image locally
-        run: docker build -t fluid-ai-backend:latest ./app
-
-      - name: Load image into local Kind cluster
-        run: kind load docker-image fluid-ai-backend:latest --name devops-challenge
-
-      - name: Restart backend deployment
-        run: kubectl rollout restart deployment/backend -n fluid-ai
-
-      - name: Wait for rollout to complete
-        run: kubectl rollout status deployment/backend -n fluid-ai --timeout=120s
