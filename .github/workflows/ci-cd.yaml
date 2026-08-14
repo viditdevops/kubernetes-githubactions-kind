@@ -17,8 +17,9 @@ jobs:
 
       - name: Install Trivy (Windows binary)
         run: |
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Invoke-WebRequest -Uri "https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Windows-64bit.zip" -OutFile trivy.zip
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/aquasecurity/trivy/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "*windows-64bit.zip" } | Select-Object -First 1
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile trivy.zip
           Expand-Archive -Path trivy.zip -DestinationPath trivy_bin -Force
           echo "$PWD\trivy_bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
