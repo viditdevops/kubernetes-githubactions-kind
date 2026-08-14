@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 import db
 from routers import health, items
-app = FastAPI(title="DevOps Challenge Completed")
+app = FastAPI(title="DevOps Challenge Completed by Vidit")
 app.include_router(health.router)
 app.include_router(items.router)
 @app.on_event("startup")
