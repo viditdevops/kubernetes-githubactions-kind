@@ -35,20 +35,48 @@ jobs:
           exit-code: '0'
           output: trivy-image-report.txt
 
+      - name: Setup Node.js (for Snyk CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      - name: Scan dependencies for vulnerabilities (Snyk)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        working-directory: ./app
+        run: |
+          snyk auth "$SNYK_TOKEN"
+          snyk test --severity-threshold=high --json-file-output=../snyk-deps-report.json || true
+
+      - name: Scan Docker image for vulnerabilities (Snyk)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk container test fluid-ai-backend:latest --severity-threshold=high --json-file-output=snyk-image-report.json || true
+
       - name: Show scan reports in logs
         run: |
-          echo "===== Filesystem/Dependency Scan ====="
+          echo "===== Trivy Filesystem/Dependency Scan ====="
           cat trivy-fs-report.txt || true
-          echo "===== Docker Image Scan ====="
+          echo "===== Trivy Docker Image Scan ====="
           cat trivy-image-report.txt || true
+          echo "===== Snyk Dependency Scan ====="
+          cat snyk-deps-report.json || true
+          echo "===== Snyk Docker Image Scan ====="
+          cat snyk-image-report.json || true
 
-      - name: Upload Trivy reports as artifacts
+      - name: Upload security reports as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-security-reports
+          name: security-scan-reports
           path: |
             trivy-fs-report.txt
             trivy-image-report.txt
+            snyk-deps-report.json
+            snyk-image-report.json
 
       - name: Create Kind cluster
         uses: helm/kind-action@v1.10.0
