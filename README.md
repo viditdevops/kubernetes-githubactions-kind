@@ -219,26 +219,23 @@ chosen reliability improvement (that's Vault), but implemented and working
 as a bonus. Since `fluid-ai.local` isn't a real DNS record, it's tested with
 an explicit `Host` header rather than relying on browser DNS resolution.
 
-## CI/CD — two independent, complementary paths
+## CI/CD — single job, GitHub-hosted runner
 
-### 1. build-and-deploy (cloud runner, every push + manual)
-Runs on GitHub-hosted `ubuntu-latest`. Checks out the code, runs a Trivy
-dependency scan, builds the Docker image, runs a Trivy image scan, uploads
-both scan reports as artifacts, spins up its own disposable Kind cluster
-inside the runner, installs Vault via Helm, configures Kubernetes
-auth/policies/roles, applies all manifests, waits for both rollouts, and
-smoke-tests `/health`. This proves the entire pipeline is reproducible from
-a clean slate - the cluster is destroyed when the job ends, so this
-validates the process, not a persistent deployment.
+`build-and-deploy` runs on GitHub-hosted `ubuntu-latest`, triggered on every
+push to `main` plus manual `workflow_dispatch`. It checks out the code, runs
+a Trivy dependency scan, builds the Docker image, runs a Trivy image scan,
+runs Snyk dependency and image scans, uploads all scan reports as a
+workflow artifact, spins up its own disposable Kind cluster inside the
+runner, installs Vault via Helm, configures Kubernetes auth/policies/roles,
+applies all manifests, waits for both rollouts, and smoke-tests `/health`.
+This proves the entire pipeline is reproducible from a clean slate - the
+cluster is destroyed when the job ends, so this validates the process
+itself, not a persistent deployment.
 
-### 2. deploy-to-local-cluster (self-hosted runner, manual trigger only)
-Runs on a self-hosted runner registered on the same machine as the actual
-local cluster (devops-challenge). Rebuilds the image, loads it via
-`kind load docker-image`, and restarts the backend Deployment - the
-automated equivalent of the manual rebuild cycle used throughout local
-development. Deliberately gated to `workflow_dispatch` only (never on
-`push`) so an ordinary commit can't unexpectedly restart the local
-cluster while it's in active use.
+**A self-hosted runner (targeting the actual local demo cluster) was
+attempted and deliberately abandoned** - see the debugging section below
+for why. The single cloud-hosted job is simpler, requires no machine to be
+kept running, and is the version actually relied on for this submission.
 
 ## Security Scanning — Trivy (bonus, part of the CI/CD pipeline)
 
@@ -343,9 +340,33 @@ useful evidence than a synthetic failure:
    `RUN sed -i 's/\r$//' entrypoint.sh` strips any stray `\r` at build
    time, making the image immune to host checkout behavior entirely.
 
-All three surfaced as `CrashLoopBackOff` - a reminder that this status is a
-symptom, not a diagnosis; `kubectl logs` and `kubectl describe pod` were
-what actually revealed the real cause each time.
+4. **Self-hosted runner on Windows - abandoned after four distinct
+   environment failures, one after another.** In an attempt to run the
+   whole pipeline against the actual local cluster in a single job, a
+   self-hosted runner was registered on the Windows machine hosting Kind.
+   Each fix uncovered a new, unrelated problem: (a) `aquasecurity/trivy-action`
+   assumes a Linux/bash environment internally and failed with a mangled
+   path; (b) switching to `shell: bash` for the workflow's own steps then
+   failed identically, traced to the Windows account's home directory
+   containing a space (`C:\Users\RADHA GUPTA`), which bash's unquoted
+   path-handling silently truncates; (c) switching to `shell: pwsh`
+   failed because PowerShell 7 wasn't installed on the runner, only
+   Windows PowerShell 5.1; (d) a hand-written Trivy download using a
+   guessed static filename 404'd, since Trivy's real release assets embed
+   the version number - fixed by querying the GitHub API for the actual
+   asset URL; (e) the downloaded `trivy.exe` then failed with "Access is
+   denied", Windows blocking execution of a freshly downloaded binary
+   until `Unblock-File` clears its "Mark of the Web" flag. After the fifth
+   fix, the decision was made to revert to a single `ubuntu-latest` job
+   rather than continue accumulating Windows-specific workarounds -
+   documented here because recognizing when to stop patching symptoms and
+   change approach is itself a debugging judgment call.
+
+All four surfaced as `CrashLoopBackOff` or a hard pipeline failure - a
+reminder that these statuses are symptoms, not diagnoses; `kubectl logs`,
+`kubectl describe pod`, and reading each new error message precisely
+(rather than assuming the previous fix's cause repeated) were what
+actually revealed the real cause each time.
 
 ## Local setup
 
