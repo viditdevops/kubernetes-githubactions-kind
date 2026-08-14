@@ -284,6 +284,39 @@ logging - not done here since none of the current findings have a fix to
 gate on yet, and enabling it risked failing the pipeline on the base
 image's inherited, unfixable issues.
 
+## Additional security/quality tooling — Snyk and SonarQube Cloud (bonus)
+
+Two more scanners layered on top of Trivy, each covering a different angle:
+
+**Snyk** (`ci-cd.yaml`, `build-and-deploy` job) runs alongside Trivy -
+a dependency scan (`snyk test`) and a Docker image scan
+(`snyk container test`), authenticated via a `SONAR_TOKEN`-style
+GitHub Secret (`SNYK_TOKEN`). The image scan found **8 vulnerable
+dependency paths (2 unique issues)**, both HIGH severity "Link Following"
+vulnerabilities in the Debian base OS packages `acl` and `attr` - the same
+base-image layer Trivy independently flagged, giving cross-tool agreement
+rather than a single vendor's possibly-biased result. Both tools confirm
+zero issues in the application's own Python dependencies.
+
+**SonarQube Cloud** (connected via GitHub App, analyzing on every push)
+provides static analysis across security, reliability, and
+maintainability. Full results in
+[`security-reports/sonarqube-report.md`](security-reports/sonarqube-report.md).
+Headline result: **zero issues in `app/main.py`, `app/db.py`, or
+`app/routers/`** - specifically confirming no SQL injection risk, since the
+codebase uses parameterized queries throughout
+(`cur.execute("INSERT INTO items (name) VALUES (%s) RETURNING id", (name,))`)
+rather than string concatenation. All 9 security findings are supply-chain
+hardening suggestions scoped to `.github/workflows/ci-cd.yaml` and
+`app/Dockerfile` (e.g. "pin GitHub Actions to a commit SHA, not a mutable
+tag") - real, actionable, but a different category and severity than an
+application-level vulnerability. Reliability shows 0 bugs; Maintainability
+shows 3 minor code-smell findings.
+
+All scan reports (Trivy x2, Snyk, SonarQube) are committed under
+[`security-reports/`](security-reports/), independent of any tool's
+artifact-retention window.
+
 ## Real debugging encountered while building this
 
 These weren't staged - they're genuine issues hit and resolved during
