@@ -281,7 +281,16 @@ logging - not done here since none of the current findings have a fix to
 gate on yet, and enabling it risked failing the pipeline on the base
 image's inherited, unfixable issues.
 
-## Additional security/quality tooling — Snyk and SonarQube Cloud (bonus)
+## Additional security/quality tooling — Snyk, SonarQube Cloud, and OWASP ZAP (bonus)
+
+**OWASP ZAP Baseline Scan** runs at the end of the CI/CD job, after the app
+is deployed and healthy, scanning the live running instance rather than
+just static code - genuine dynamic testing mapped to OWASP Top 10
+categories. Result: **70 checks run, 66 passed, 0 failures**, with 4 minor
+warnings (missing `X-Content-Type-Options`, `Cross-Origin-Resource-Policy`,
+and `Sec-Fetch-Dest` headers - low-severity hardening suggestions, not
+exploitable findings). Full HTML report uploaded as the `owasp-zap-report`
+workflow artifact.
 
 Two more scanners layered on top of Trivy, each covering a different angle:
 
